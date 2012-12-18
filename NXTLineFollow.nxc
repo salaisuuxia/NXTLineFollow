@@ -1,0 +1,383 @@
+/*
+
+features:
+-turns on green, not on crossroads
+-stays on the center of the line most of the time
+-navigates tight corners
+
+-modular subroutine architecture
+-LCD and audio debugging
+-concurrent processing
+-simple and logical decision making
+
+
+what I would have liked to include with more time and components:
+-counting squares - checking if green has come up on opposite sides and is likely to be the gridlock; squares come in pairs
+-RGB colour sensor - better sensing of difference between green squares and side of line
+-android image processing/bluetooth
+-picking up can for premier rescue
+
+
+
+
+
+
+
+
+################ subroutine and task declarations ################
+  this is needed so wherever in code there is a subroutine,
+  the sub doesn't have to appear on a previous line to when it's called.
+*/
+
+sub greenOnLeft();
+sub greenOnRight();
+sub hitAllBlack();
+sub leftgreen();
+sub rightgreen();
+sub leftToLine();
+sub rightToLine();
+sub waterTower();
+
+
+task readings();
+task drive();
+
+
+/*  ################ hardcoded sensor values and timing ################
+  these seem to be more accurate than having dynamic values,
+  as the lighting conditions in the IT lab seem static.
+  
+  they also make logic much easier to understand when it comes to the sensor reading loop.
+*/
+
+#define R_WHITE (SENSOR_1 > 520)
+#define M_WHITE (SENSOR_2 > 550)       //sensor readings for white are usually above 560
+#define L_WHITE (SENSOR_3 > 550)
+
+#define R_BLACK (SENSOR_1 < 400)
+#define M_BLACK (SENSOR_2 < 425)       //sensor readings for black are usually less than 400
+#define L_BLACK (SENSOR_3 < 400)
+
+#define R_GREEN (!R_WHITE && !R_BLACK)
+#define M_GREEN (!M_WHITE && !M_BLACK) //we want to treat anything that isn't black or white as green.
+#define L_GREEN (!L_WHITE && !L_BLACK)
+
+
+#define timeToClear 3000               //it takes 3 seconds to traverse half a tile with a speed of 30- used to move away from the bottle
+#define timeTo90Degrees 1300           //it takes 1.3 seconds to turn at a right angle with both wheels running in opposite directions with a speed of 30- used to turn away from the bottle
+#define timeTo45Degrees 650            //it takes 0.65 seconds to turn at 45 degrees- used to turn at a shallow angle back onto the line.
+
+
+#define speed 30                       //a good speed that seems to work over the speedbumps, bridge and gives reliable sensor readings.
+                                       //interesting speed-up results may occur if changed to an incremental integer when it hasn't seen green
+
+
+// ################ startup and setup task ################
+
+task main()
+{
+ SetSensorLight(S1);                   //set up each of the 3 light sensors to be recognised as light sensors
+ SetSensorLight(S2);
+ SetSensorLight(S3);
+ SetSensorMode(S1, SENSOR_MODE_RAW);   //give each sensor a value from 0-1024 instead of percent
+ SetSensorMode(S2, SENSOR_MODE_RAW);
+ SetSensorMode(S3, SENSOR_MODE_RAW);
+ SetSensorLowspeed(S4);                //allow the Ultrasonic sensor to run at a lower speed on the I2C bus
+ Precedes(readings, drive);            //start both the main important tasks.
+}
+
+
+
+// ################ debug to LCD ################
+//a nice way of visualising the sensor readings and being able to see problems with the hardcoded values at a glance.
+//utilises concurrent processing so it can run at a different timing (wait) to the drive task.
+
+
+task readings()
+{
+ while (true)
+  {
+   TextOut(0, LCD_LINE1, "sensor readings");         //output each of the sensor readings to the LCD, clearing the previous line just beforehand.
+   ClearLine(LCD_LINE2);
+   NumOut(0, LCD_LINE2, SENSOR_1);
+   ClearLine(LCD_LINE3);
+   NumOut(0, LCD_LINE3, SENSOR_2);
+   ClearLine(LCD_LINE4);
+   NumOut(0, LCD_LINE4, SENSOR_3);
+   ClearLine(LCD_LINE5);
+   NumOut (0,LCD_LINE5, SensorUS(IN_4));
+   ClearLine(LCD_LINE6);
+
+   if (L_WHITE) TextOut(20,LCD_LINE2, "LEFT WHITE");            //give visual debugging of logic- note that we don't have to clear the line as they are all exactly 10 characters long
+   else if (L_GREEN) TextOut(20,LCD_LINE2, "LEFT GREEN");
+   else if (L_BLACK) TextOut(20,LCD_LINE2, "LEFT BLACK");
+   if (M_WHITE) TextOut(20,LCD_LINE3, "MIDDLE WHITE");
+   else if (M_GREEN) TextOut(20,LCD_LINE3, "MIDDLE GREEN");
+   else if (M_BLACK) TextOut(20,LCD_LINE3, "MIDDLE BLACK");
+   if (R_WHITE) TextOut(20,LCD_LINE4, "RIGHT WHITE");
+   else if (R_GREEN) TextOut(20,LCD_LINE4, "RIGHT GREEN");
+   else if (R_BLACK) TextOut(20,LCD_LINE4, "RIGHT BLACK");
+
+
+   Wait(100);         //give a little time to let the screen sync so we can read it
+  }
+}
+
+
+
+
+
+
+
+// ################ main decision making task ################
+
+task drive()
+{
+ while (true)
+  {
+   if (SensorUS(IN_4) < 10)        //we're less than 10 centimeters from the bottle and facing it
+    {
+     until (SensorUS(IN_4) > 10)   //we want to reverse away from it until we're almost exactly 10cm.
+      {
+       PlayTone(6000, 10);         //beep to tell us that it's fount the water tower and reversing
+       OnRev(OUT_AC,speed);        //reverse with both wheels
+      }
+     waterTower();                 //we're the right distance from the water tower- we're ready to turn.
+    }
+
+
+   else if ((L_BLACK) && (M_BLACK) && (R_BLACK))          //all three sensors are on the black line
+    {
+     hitAllBlack();                     //we want to determine whether it's green squares or crossroads and choose the correct outcome
+    }
+   else if ((R_WHITE) && (L_WHITE))
+    {
+     OnFwd(OUT_AC,speed);               //we should be on the center of the line and driving normally.
+    }
+
+
+
+   else if ((L_GREEN) && (M_BLACK) && (R_WHITE))
+    {
+     greenOnLeft();                     //the middle sensor is on the line- we know that the left sensor is off the line, (so not a false positive) but it has hit green.
+    }
+   else if ((L_WHITE) && (M_BLACK) && (R_GREEN))
+    {
+     greenOnRight();                    //the middle sensor is on the line- we know that the left sensor is off the line,(so not a false positive) but it has hit green.
+    }
+
+
+
+   else if (L_BLACK)                    //only 1 or two inputs are black- treat this as the line and turn.
+    {
+     leftToLine();
+    }
+   else if (R_BLACK)                    //only 1 or two inputs are black- treat this as the line and turn.
+    {
+     rightToLine();
+    }
+
+
+
+   else if ((L_GREEN) && (M_WHITE) && (R_WHITE))     //we can either have the left sensor slightly on the line and the others off,
+    {                                                //or we hit a green square while the middle and right sensors are off on the other side.
+     leftToLine();                                   //either way, it can't hurt to center on the line to get a better reading.
+    }
+    else if ((L_WHITE) && (M_WHITE) && (R_GREEN))    //we can either have the right sensor slightly on the line and the others off,
+    {                                                //or we hit a green square while the middle and left sensors are off on the other side.
+     rightToLine();                                  //either way, it can't hurt to center on the line to get a better reading.
+    }
+
+
+
+   else   //we're getting strange readings- these are perfectly normal, but it's good to go back a little and try again.
+    {
+     OnRev(OUT_AC,speed);
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+// ################ timed turns at line after green squares ################
+
+sub leftgreen()
+{                     //we need to turn left- completely based on time so we can ignore sensor inputs
+ PlayTone(6000, 10);  //give us some debugging
+ OnFwd(OUT_A,speed);  //we need to make a sharp pivot- turn the wheels in opposite directions
+ OnRev(OUT_C,speed);
+ Wait(700);           //wait 0.7 of a second so we are turned about 60 degrees
+ OnFwd(OUT_C,speed);  //we need to drive forward a little to correct our position on the line
+ Wait(300);           //wait 0.3 of a second so we are back on the line
+}
+
+sub rightgreen()
+{                     //we need to turn right- completely based on time so we can ignore sensor inputs
+ PlayTone(6000, 10);  //give us some debugging
+ OnFwd(OUT_C,speed);  //we need to make a sharp pivot- turn the wheels in opposite directions
+ OnRev(OUT_A,speed);
+ Wait(700);           //wait 0.7 of a second so we are turned about 60 degrees
+ OnFwd(OUT_A,speed);  //we need to drive forward a little to correct our position on the line
+ Wait(300);           //wait 0.3 of a second so we are back on the line
+}
+
+
+
+
+
+// ################ verification that there's no green and drive past crossroads ################
+
+sub hitAllBlack()
+{
+ OnRev(OUT_AC,30);
+ Wait(400);                         //we need to reverse back so we can check if there's any green.
+ 
+ if (L_GREEN) greenOnLeft();        //check whether if we have green; and if so, whether it's on the left or right and call the appropriate subroutine.
+
+ else if (R_GREEN) greenOnRight();
+
+ else if (L_WHITE && R_WHITE)     //there's no green, so we can just drive past the line.
+  {
+   OnFwd(OUT_AC,30);
+   Wait(600);                     //we need to drive forward the distance that we just reversed (400) plus a little extra to go over the line.
+   PlayTone(6000, 1000);          //give us some debugging so we know that it recognised the line rather than just being a fluke.
+  }
+}
+
+
+
+// ################ simple turning sequences to follow a simple line ################
+
+sub leftToLine()         //we need to turn left to center the robot on the line.
+{
+ until (M_BLACK)         //center us on the line- avoids missing green and allows us to drive off the line and come back onto it at tight corners.
+  {
+   OnFwd(OUT_A,speed);   //we need to turn forwards on the opposite wheel (in case we just hit a crossroads at an angle- this will straighten us up)
+   Off(OUT_C);
+   if (R_GREEN) return;  //we don't want to miss a green square when we're turning- we shouldn't see the line on this side at all, so we can assume it's a green square.
+  }
+}
+sub rightToLine()       //we need to turn right to center the robot on the line.
+{
+ until (M_BLACK)        //center us on the line- avoids missing green and allows us to drive off the line and come back onto it at tight corners.
+  {
+   OnFwd(OUT_C,speed);  //we need to turn forwards on the opposite wheel (in case we just hit a crossroads at an angle- this will straighten us up)
+   Off(OUT_A);
+   if (L_GREEN) return; //we don't want to miss a green square when we're turning- we shouldn't see the line on this side at all, so we can assume it's a green square.
+  }
+}
+
+
+
+
+
+// ################ green verify and turn ################
+//this is triggered when we hit the green square on one side, have the middle on black and the other side on white.
+//we can safely assume that this condition is only met when we're centered on the line; one of the benefits of turning until the middle hits the black.
+
+
+sub greenOnLeft()
+{
+ until(L_BLACK)          //we need to drive forward until we hit the line, as we only just registered there's a green square.
+  {
+   OnFwd(OUT_AC,speed);
+  }
+ OnRev(OUT_AC,speed);    //reverse a little so we can verify- 0.4 of a second positions us directly on the square.
+ Wait(400);
+
+ if (L_GREEN)            //we only need to verify that green is on the left.
+  {
+   OnFwd(OUT_AC,speed);   //we've verified that it is green, so we can just drive back onto the line (the distance we just reversed) and turn
+   Wait(400);
+   leftgreen();          //we can simply call the timed turning sequence.
+  }
+ else                    //our verification has proved that there is no green square, so we can treat  this as a crossroads.
+  {
+   OnFwd(OUT_AC,speed);  //we've verified that there's no green, so we can just drive back onto the line (the distance we just reversed)
+   Wait(400);
+   hitAllBlack();        //get the hitallblack (crossroads) subroutine to verify again, then make a final decision whether it's green or just drive past.
+  }
+}
+
+
+
+sub greenOnRight()
+{
+ until(R_BLACK)          //we need to drive forward until we hit the line, as we only just registered there's a green square.
+  {
+   OnFwd(OUT_AC,speed);
+  }
+ OnRev(OUT_AC,speed);    //reverse a little so we can verify- 0.4 of a second positions us directly on the square.
+ Wait(400);
+ if (R_GREEN)            //we only need to verify that green is on the right.
+  {
+   OnFwd(OUT_AC,speed);  //we've verified that it is green, so we can just drive back onto the line (the distance we just reversed) and turn
+   Wait(400);
+   rightgreen();          //we can simply call the timed turning sequence.
+  }
+ else
+  {
+   OnFwd(OUT_AC,speed);  //we've verified that there's no green, so we can just drive back onto the line (the distance we just reversed)
+   Wait(400);
+   hitAllBlack();        //get the hitallblack (crossroads) subroutine to verify again, then make a final decision whether it's green or just drive past.
+  }
+}
+
+
+
+
+
+
+// ################ watertower avoidance ################
+
+sub waterTower()
+{
+ until ( L_WHITE && M_WHITE && R_WHITE)
+  {
+   OnFwd(OUT_C,speed);     //turn forward right with one wheel until we're slightly off the line
+   Off(OUT_A);
+  }
+ until (R_BLACK)           //reverse opposite wheel until back on the line
+  {
+   OnRev(OUT_A,speed);     //turn backwards left with one wheel until we're slightly off the line
+   Off(OUT_C);
+  }
+ OnFwd(OUT_C,30);
+ Wait(200);                //drive forward a little to straighten up - we're at 90 degrees no matter what our starting angle was
+ 
+
+ OnFwd(OUT_AC,30);
+ Wait(timeToClear);        //drive out away from the black line until we clear the bottle
+
+ OnFwd(OUT_A,30);
+ OnRev(OUT_C,30);
+ Wait (timeTo90Degrees);   //turn both wheels so we're roughly ninety degrees so we're parallel to the line
+
+ OnFwd(OUT_AC,30);
+ Wait(timeToClear+1000);   //drive forward just over half the tile to be safe
+ 
+ 
+ OnFwd(OUT_A,30);
+ OnRev(OUT_C,30);
+ Wait (timeTo45Degrees);   //turn back towards the line- anything more than 45 degrees and we wouldn't be able to simply return to normal line following.
+
+
+ until (R_BLACK)
+  {
+   OnFwd(OUT_AC,30);       //drive forward until we get back onto the black line
+  }
+}
+
